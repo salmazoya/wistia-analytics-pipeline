@@ -1,0 +1,64 @@
+name: Deploy Streamlit Dashboard
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'streamlit/**'
+      - '.github/workflows/deploy-streamlit.yml'
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          cd streamlit
+          pip install -r requirements.txt
+
+      - name: Lint Python code
+        run: |
+          cd streamlit
+          pip install pylint
+          pylint app.py --exit-zero || true
+
+      - name: Validate requirements.txt
+        run: |
+          cd streamlit
+          python -m pip install --dry-run -r requirements.txt
+
+      - name: Check Streamlit app syntax
+        run: |
+          cd streamlit
+          python -m py_compile app.py
+          echo "✅ Streamlit app syntax is valid"
+
+      - name: Notify on code validation success
+        if: success()
+        run: |
+          echo "✅ Code validation passed!"
+          echo "App file: streamlit/app.py"
+          echo "Dependencies: streamlit/requirements.txt"
+          
+          echo ""
+          echo "📢 Next steps:"
+          echo "1. Streamlit Cloud auto-deploys on push to main"
+          echo "2. Dashboard will be available at: https://share.streamlit.io/<username>/wistia-analytics-dashboard"
+          echo "3. Make sure GitHub repo is connected to Streamlit Cloud"
+
+      - name: Notify on failure
+        if: failure()
+        run: |
+          echo "❌ Code validation failed!"
+          exit 1

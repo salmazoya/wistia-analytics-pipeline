@@ -1,0 +1,20 @@
+[client]
+showErrorDetails = true
+showWarningOnDirectoryDelete = false
+
+[logger]
+level = "info"
+messageFormat = "%(asctime)s.%(msecs)03d [%(levelname)s] %(message)s"
+
+[server]
+maxUploadSize = 200
+enableXsrfProtection = true
+enableCORS = false
+port = 8501
+
+[theme]
+primaryColor = "#1f77b4"
+backgroundColor = "#ffffff"
+secondaryBackgroundColor = "#f0f2f6"
+textColor = "#262730"
+font = "sans serif"
