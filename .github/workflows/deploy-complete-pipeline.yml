@@ -44,7 +44,7 @@ jobs:
       - name: "[1/4] Install dependencies for Lambda"
         run: |
           cd lambda
-          pip install -r ../requirements.txt -t ./package/
+          pip install -r requirements.txt -t ./package/
           cp src/index.py ./package/
 
       - name: "[1/4] Create Lambda deployment package"
