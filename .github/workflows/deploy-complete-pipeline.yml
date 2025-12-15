@@ -1,5 +1,3 @@
-# Create the new unified workflow
-
 name: Deploy Complete Pipeline
 
 on:
@@ -44,7 +42,7 @@ jobs:
       - name: "[1/4] Install dependencies for Lambda"
         run: |
           cd lambda
-          pip install -r requirements.txt -t ./package/
+          pip install -r ./requirements.txt -t ./package/
           cp src/index.py ./package/
 
       - name: "[1/4] Create Lambda deployment package"
@@ -133,11 +131,9 @@ jobs:
           python << 'PYTHON_EOF'
           from pyathena import connect
 
-          # Read SQL file
           with open('config/athena-ddl.sql', 'r') as f:
               sql_commands = f.read().split(';')
 
-          # Connect to Athena
           conn = connect(
               s3_output='s3://wistia-analytics-athena-results/',
               region_name='us-east-1'
@@ -174,7 +170,6 @@ jobs:
           )
           cursor = conn.cursor()
 
-          # List tables
           cursor.execute("SHOW TABLES IN wistia_analytics")
           tables = cursor.fetchall()
 
@@ -186,9 +181,6 @@ jobs:
           conn.close()
           PYTHON_EOF
 
-      # ============================================================================
-      # FINAL SUMMARY
-      # ============================================================================
       - name: "✅ Deployment Complete"
         if: success()
         run: |
@@ -198,16 +190,14 @@ jobs:
           echo "=========================================="
           echo ""
           echo "Deployed:"
-          echo "  [1/4] ✅ Lambda: ${{ env.LAMBDA_FUNCTION_NAME }}"
-          echo "  [2/4] ✅ Glue: ${{ env.GLUE_JOB_NAME }}"
-          echo "  [3/4] ✅ Streamlit: Validated"
-          echo "  [4/4] ✅ Athena: Database & Tables Created"
-          echo ""
-          echo "Next: Pipeline will run automatically at 2 AM UTC"
+          echo "  [1/4] ✅ Lambda"
+          echo "  [2/4] ✅ Glue"
+          echo "  [3/4] ✅ Streamlit"
+          echo "  [4/4] ✅ Athena"
           echo ""
 
       - name: "❌ Deployment Failed"
         if: failure()
         run: |
-          echo "❌ Deployment failed. Check logs above for details."
+          echo "❌ Deployment failed. Check logs above."
           exit 1
