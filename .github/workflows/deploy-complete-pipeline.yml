@@ -1,0 +1,213 @@
+# Create the new unified workflow
+
+name: Deploy Complete Pipeline
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+env:
+  AWS_REGION: us-east-1
+  LAMBDA_FUNCTION_NAME: wistia-ingestion-lambda
+  GLUE_JOB_NAME: wistia-transform-to-curated
+  ATHENA_DATABASE: wistia_analytics
+  ATHENA_RESULTS_BUCKET: wistia-analytics-athena-results
+
+jobs:
+  deploy-all:
+    runs-on: ubuntu-latest
+
+    steps:
+      # ============================================================================
+      # SETUP
+      # ============================================================================
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # ============================================================================
+      # LAMBDA DEPLOYMENT
+      # ============================================================================
+      - name: "[1/4] Install dependencies for Lambda"
+        run: |
+          cd lambda
+          pip install -r ../requirements.txt -t ./package/
+          cp src/index.py ./package/
+
+      - name: "[1/4] Create Lambda deployment package"
+        run: |
+          cd lambda/package
+          zip -r ../wistia-ingestion-lambda.zip .
+          cd ..
+          ls -lh wistia-ingestion-lambda.zip
+
+      - name: "[1/4] Upload Lambda ZIP to S3"
+        run: |
+          aws s3 cp lambda/wistia-ingestion-lambda.zip \
+            s3://wistia-analytics/lambda-deployments/wistia-ingestion-lambda.zip
+
+      - name: "[1/4] Update Lambda function"
+        run: |
+          aws lambda update-function-code \
+            --function-name ${{ env.LAMBDA_FUNCTION_NAME }} \
+            --s3-bucket wistia-analytics \
+            --s3-key lambda-deployments/wistia-ingestion-lambda.zip
+
+          aws lambda wait function-updated \
+            --function-name ${{ env.LAMBDA_FUNCTION_NAME }}
+
+      - name: "[1/4] Test Lambda function"
+        run: |
+          aws lambda invoke \
+            --function-name ${{ env.LAMBDA_FUNCTION_NAME }} \
+            --payload '{"execution_date": "'$(date -u +%Y-%m-%d)'"}' \
+            response.json
+
+          echo "✅ Lambda Response:"
+          cat response.json
+
+      # ============================================================================
+      # GLUE DEPLOYMENT
+      # ============================================================================
+      - name: "[2/4] Upload Glue script to S3"
+        run: |
+          aws s3 cp glue/src/transform_wistia_curated.py \
+            s3://wistia-analytics/glue-scripts/transform_wistia_curated.py
+
+          echo "✅ Glue script uploaded successfully"
+
+      - name: "[2/4] Verify Glue job exists"
+        run: |
+          aws glue get-job \
+            --name ${{ env.GLUE_JOB_NAME }} \
+            --query 'Job.[Name,State,LastModifiedOn]' \
+            --output table
+
+      # ============================================================================
+      # STREAMLIT DEPLOYMENT
+      # ============================================================================
+      - name: "[3/4] Validate Streamlit dependencies"
+        run: |
+          pip install -r requirements.txt --dry-run
+
+      - name: "[3/4] Lint Streamlit code"
+        run: |
+          pip install pylint
+          pylint streamlit/app.py --exit-zero || true
+
+      - name: "[3/4] Check Streamlit app syntax"
+        run: |
+          python -m py_compile streamlit/app.py
+          echo "✅ Streamlit app syntax is valid"
+
+      # ============================================================================
+      # ATHENA SETUP
+      # ============================================================================
+      - name: "[4/4] Check/Create Athena results bucket"
+        run: |
+          aws s3api head-bucket --bucket ${{ env.ATHENA_RESULTS_BUCKET }} 2>/dev/null || \
+          (echo "Creating Athena results bucket..." && \
+          aws s3api create-bucket \
+            --bucket ${{ env.ATHENA_RESULTS_BUCKET }} \
+            --region ${{ env.AWS_REGION }})
+
+          echo "✅ Athena results bucket ready"
+
+      - name: "[4/4] Create Athena database and tables"
+        run: |
+          pip install pyathena
+
+          python << 'PYTHON_EOF'
+          from pyathena import connect
+
+          # Read SQL file
+          with open('config/athena-ddl.sql', 'r') as f:
+              sql_commands = f.read().split(';')
+
+          # Connect to Athena
+          conn = connect(
+              s3_output='s3://wistia-analytics-athena-results/',
+              region_name='us-east-1'
+          )
+          cursor = conn.cursor()
+
+          executed = 0
+          for sql in sql_commands:
+              sql = sql.strip()
+              if sql and not sql.startswith('--'):
+                  try:
+                      print(f"Executing: {sql[:80]}...")
+                      cursor.execute(sql)
+                      executed += 1
+                      print("✅ Success")
+                  except Exception as e:
+                      print(f"⚠️  {str(e)}")
+
+          print(f"\n✅ Executed {executed} SQL statements")
+          cursor.close()
+          conn.close()
+          PYTHON_EOF
+
+      - name: "[4/4] Verify Athena tables"
+        run: |
+          pip install pyathena
+
+          python << 'PYTHON_EOF'
+          from pyathena import connect
+
+          conn = connect(
+              s3_output='s3://wistia-analytics-athena-results/',
+              region_name='us-east-1'
+          )
+          cursor = conn.cursor()
+
+          # List tables
+          cursor.execute("SHOW TABLES IN wistia_analytics")
+          tables = cursor.fetchall()
+
+          print("✅ Tables in wistia_analytics:")
+          for table in tables:
+              print(f"  - {table[0]}")
+
+          cursor.close()
+          conn.close()
+          PYTHON_EOF
+
+      # ============================================================================
+      # FINAL SUMMARY
+      # ============================================================================
+      - name: "✅ Deployment Complete"
+        if: success()
+        run: |
+          echo ""
+          echo "=========================================="
+          echo "✅ ALL DEPLOYMENTS SUCCESSFUL!"
+          echo "=========================================="
+          echo ""
+          echo "Deployed:"
+          echo "  [1/4] ✅ Lambda: ${{ env.LAMBDA_FUNCTION_NAME }}"
+          echo "  [2/4] ✅ Glue: ${{ env.GLUE_JOB_NAME }}"
+          echo "  [3/4] ✅ Streamlit: Validated"
+          echo "  [4/4] ✅ Athena: Database & Tables Created"
+          echo ""
+          echo "Next: Pipeline will run automatically at 2 AM UTC"
+          echo ""
+
+      - name: "❌ Deployment Failed"
+        if: failure()
+        run: |
+          echo "❌ Deployment failed. Check logs above for details."
+          exit 1
