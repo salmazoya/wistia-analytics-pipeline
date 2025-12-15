@@ -5,8 +5,8 @@ on:
     branches:
       - main
     paths:
-      - 'lambda/**'
-      - '.github/workflows/deploy-lambda.yml'
+      - "lambda/**"
+      - ".github/workflows/deploy-lambda.yml"
   workflow_dispatch:
 
 env:
@@ -16,7 +16,7 @@ env:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v3
@@ -24,12 +24,12 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
-          python-version: '3.11'
+          python-version: "3.11"
 
       - name: Install dependencies
         run: |
           cd lambda
-          pip install -r requirements.txt -t ./package/
+          pip install -r ../requirements.txt -t ./package/
           cp src/index.py ./package/
 
       - name: Create deployment package
@@ -57,8 +57,7 @@ jobs:
             --function-name ${{ env.LAMBDA_FUNCTION_NAME }} \
             --s3-bucket wistia-analytics \
             --s3-key lambda-deployments/wistia-ingestion-lambda.zip
-          
-          # Wait for update to complete
+
           aws lambda wait function-updated \
             --function-name ${{ env.LAMBDA_FUNCTION_NAME }}
 
@@ -75,23 +74,14 @@ jobs:
             --function-name ${{ env.LAMBDA_FUNCTION_NAME }} \
             --payload '{"execution_date": "'$(date -u +%Y-%m-%d)'"}' \
             response.json
-          
+
           echo "Lambda response:"
           cat response.json
-
-      - name: Check Lambda logs
-        if: always()
-        run: |
-          aws logs tail /aws/lambda/${{ env.LAMBDA_FUNCTION_NAME }} \
-            --since 5m \
-            --max-items 20 || true
 
       - name: Notify on success
         if: success()
         run: |
           echo "✅ Lambda deployment successful!"
-          echo "Function: ${{ env.LAMBDA_FUNCTION_NAME }}"
-          echo "Region: ${{ env.AWS_REGION }}"
 
       - name: Notify on failure
         if: failure()
