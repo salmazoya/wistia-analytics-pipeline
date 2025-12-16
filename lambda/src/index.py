@@ -1,26 +1,24 @@
 """
 Wistia Analytics Data Ingestion Lambda Function
 Fetches data from Wistia APIs and writes to S3
-Updated to read API token from AWS Secrets Manager
+Reads API token from AWS Secrets Manager (plain string format)
 """
 
 import json
 import boto3
 import requests
 import logging
-from datetime import datetime, timedelta
-from typing import Dict, List, Any, Optional
+from datetime import datetime
 
 # Initialize AWS clients
 s3_client = boto3.client('s3')
 dynamodb = boto3.resource('dynamodb')
 secrets_client = boto3.client('secretsmanager')
-ssm_client = boto3.client('ssm')
 
-# Environment variables
+# Configuration
 BUCKET_NAME = 'wistia-analytics'
 DYNAMODB_TABLE = 'wistia_run_status'
-SECRETS_NAME = 'wistia-api-token'  # Secrets Manager secret name
+SECRETS_NAME = 'wistia-api-token'
 
 # Logging
 logger = logging.getLogger()
@@ -30,35 +28,28 @@ logger.setLevel(logging.INFO)
 def get_wistia_token() -> str:
     """
     Retrieve Wistia API token from AWS Secrets Manager
+    Handles plain string format
     """
     try:
         logger.info(f"Fetching Wistia API token from Secrets Manager: {SECRETS_NAME}")
         
         response = secrets_client.get_secret_value(SecretId=SECRETS_NAME)
         
-        # Handle different secret formats
-        if 'SecretString' in response:
-            secret = json.loads(response['SecretString'])
-            # Check if it's a JSON object with 'api_token' key
-            if isinstance(secret, dict) and 'api_token' in secret:
-                token = secret['api_token']
-            # Or if it's just the token string
-            elif isinstance(secret, str):
-                token = secret
-            else:
-                token = str(secret)
-        else:
-            token = response['SecretBinary']
+        # Get the secret value (works for plain strings)
+        token = response.get('SecretString', '')
         
-        logger.info("✅ Successfully retrieved Wistia API token from Secrets Manager")
+        if not token:
+            raise ValueError("Secret is empty")
+        
+        logger.info("✅ Successfully retrieved Wistia API token")
         return token.strip()
         
     except Exception as e:
-        logger.error(f"❌ Failed to retrieve Wistia API token from Secrets Manager: {str(e)}")
+        logger.error(f"❌ Failed to retrieve token: {str(e)}")
         raise
 
 
-def get_wistia_medias(api_token: str) -> List[Dict[str, Any]]:
+def get_wistia_medias(api_token: str) -> list:
     """
     Fetch all media from Wistia account
     """
@@ -77,11 +68,11 @@ def get_wistia_medias(api_token: str) -> List[Dict[str, Any]]:
         return medias
         
     except Exception as e:
-        logger.error(f"❌ Failed to fetch media from Wistia: {str(e)}")
+        logger.error(f"❌ Failed to fetch media: {str(e)}")
         raise
 
 
-def get_media_stats(media_id: str, api_token: str) -> Dict[str, Any]:
+def get_media_stats(media_id: str, api_token: str) -> dict:
     """
     Fetch engagement statistics for a specific media
     """
@@ -95,11 +86,11 @@ def get_media_stats(media_id: str, api_token: str) -> Dict[str, Any]:
         return response.json()
         
     except Exception as e:
-        logger.warning(f"⚠️ Failed to fetch stats for media {media_id}: {str(e)}")
+        logger.warning(f"⚠️ Failed to fetch stats for {media_id}: {str(e)}")
         return {}
 
 
-def save_to_s3(data: Dict[str, Any], s3_path: str) -> None:
+def save_to_s3(data: dict, s3_path: str) -> None:
     """
     Save data to S3
     """
@@ -110,24 +101,24 @@ def save_to_s3(data: Dict[str, Any], s3_path: str) -> None:
             Body=json.dumps(data, indent=2),
             ContentType='application/json'
         )
-        logger.info(f"✅ Saved data to s3://{BUCKET_NAME}/{s3_path}")
+        logger.info(f"✅ Saved to s3://{BUCKET_NAME}/{s3_path}")
         
     except Exception as e:
         logger.error(f"❌ Failed to save to S3: {str(e)}")
         raise
 
 
-def log_run_status(status: Dict[str, Any]) -> None:
+def log_run_status(status: dict) -> None:
     """
     Log run status to DynamoDB
     """
     try:
         table = dynamodb.Table(DYNAMODB_TABLE)
         table.put_item(Item=status)
-        logger.info(f"✅ Logged run status to DynamoDB")
+        logger.info("✅ Logged status to DynamoDB")
         
     except Exception as e:
-        logger.warning(f"⚠️ Failed to log to DynamoDB: {str(e)}")
+        logger.warning(f"⚠️ Could not log to DynamoDB: {str(e)}")
 
 
 def lambda_handler(event, context):
@@ -150,12 +141,12 @@ def lambda_handler(event, context):
     try:
         logger.info(f"🚀 Starting Wistia ingestion for {execution_date}")
         
-        # Step 1: Get Wistia API token from Secrets Manager
-        logger.info("Step 1: Retrieving API credentials...")
+        # Step 1: Get API token
+        logger.info("Step 1: Retrieving API token...")
         try:
             api_token = get_wistia_token()
         except Exception as e:
-            status['errors'].append(f"API token retrieval failed: {str(e)}")
+            status['errors'].append(f"Token retrieval failed: {str(e)}")
             status['status'] = 'FAILED'
             end_time = datetime.utcnow()
             status['end_time'] = end_time.isoformat()
@@ -192,12 +183,12 @@ def lambda_handler(event, context):
                 media_id = media.get('id', 'unknown')
                 media_name = media.get('name', 'unknown')
                 
-                logger.info(f"Processing media: {media_name} ({media_id})")
+                logger.info(f"Processing: {media_name} ({media_id})")
                 
-                # Get stats for this media
+                # Get stats
                 stats = get_media_stats(media_id, api_token)
                 
-                # Combine media info with stats
+                # Combine data
                 media_data = {
                     'media_id': media_id,
                     'name': media_name,
@@ -214,21 +205,20 @@ def lambda_handler(event, context):
                 status['records_ingested'] += 1
                 
             except Exception as e:
-                logger.error(f"❌ Error processing media {media_id}: {str(e)}")
-                status['errors'].append(f"Media processing error: {str(e)}")
+                logger.error(f"❌ Error processing {media_id}: {str(e)}")
+                status['errors'].append(f"Processing error: {str(e)}")
                 continue
         
         # Step 4: Success
         status['status'] = 'SUCCESS'
-        logger.info(f"✅ Ingestion completed successfully")
+        logger.info(f"✅ Ingestion completed - {status['media_processed']} medias processed")
         
     except Exception as e:
-        logger.error(f"❌ Unexpected error in Lambda: {str(e)}")
+        logger.error(f"❌ Unexpected error: {str(e)}")
         status['errors'].append(f"Unexpected error: {str(e)}")
         status['status'] = 'FAILED'
     
     finally:
-        # Log final status
         end_time = datetime.utcnow()
         status['end_time'] = end_time.isoformat()
         status['duration_seconds'] = (end_time - start_time).total_seconds()
@@ -238,7 +228,6 @@ def lambda_handler(event, context):
         except Exception as e:
             logger.warning(f"⚠️ Could not log final status: {str(e)}")
     
-    # Return response
     return {
         'statusCode': 200 if status['status'] == 'SUCCESS' else 500,
         'body': json.dumps(status)
