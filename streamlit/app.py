@@ -41,11 +41,12 @@ date_range = st.sidebar.radio("Select date range:", ["Last 7 days", "Last 30 day
 
 @st.cache_resource
 def get_athena_connection():
-    """Create cached Athena connection"""
+    """Create cached Athena connection with proper staging directory"""
     try:
         conn = connect(
-            s3_output='s3://wistia-analytics-athena-results/',
-            region_name='us-east-1'
+            region_name='us-east-1',
+            s3_staging_dir='s3://wistia-analytics-athena-results/',
+            work_group='primary'
         )
         return conn
     except Exception as e:
@@ -58,6 +59,7 @@ def query_athena(sql_query):
     try:
         conn = get_athena_connection()
         if conn is None:
+            st.error("❌ No Athena connection")
             return None
         
         cursor = conn.cursor()
@@ -87,31 +89,47 @@ def query_athena(sql_query):
 st.markdown("## 📈 Key Metrics")
 
 try:
-    # Total Media
-    total_media_query = "SELECT COUNT(*) as total FROM wistia_analytics.dim_media"
-    total_media_df = query_athena(total_media_query)
-    
-    # Total Engagement
-    engagement_query = "SELECT SUM(plays) as total_plays, SUM(unique_visitors) as total_visitors FROM wistia_analytics.fact_engagement"
-    engagement_df = query_athena(engagement_query)
-    
-    # Create metric columns
     col1, col2, col3, col4 = st.columns(4)
     
-    if total_media_df is not None and not total_media_df.empty:
-        total_media = int(total_media_df['total'].values[0])
-        col1.metric("📹 Total Videos", f"{total_media:,}")
+    with col1:
+        st.markdown("### 📹 Total Videos")
+        total_media_query = "SELECT COUNT(*) as total FROM wistia_analytics.dim_media"
+        total_media_df = query_athena(total_media_query)
+        if total_media_df is not None and not total_media_df.empty:
+            total_media = int(total_media_df['total'].values[0])
+            st.metric("Videos", f"{total_media:,}")
+        else:
+            st.metric("Videos", "Loading...")
     
-    if engagement_df is not None and not engagement_df.empty:
-        total_plays = int(engagement_df['total_plays'].values[0]) if engagement_df['total_plays'].values[0] else 0
-        total_visitors = int(engagement_df['total_visitors'].values[0]) if engagement_df['total_visitors'].values[0] else 0
-        
-        col2.metric("▶️ Total Plays", f"{total_plays:,}")
-        col3.metric("👥 Total Visitors", f"{total_visitors:,}")
-        
-        if total_plays > 0 and total_visitors > 0:
-            avg_play_rate = (total_plays / total_visitors) * 100
-            col4.metric("📊 Avg Play Rate", f"{avg_play_rate:.1f}%")
+    with col2:
+        st.markdown("### ▶️ Total Plays")
+        plays_query = "SELECT SUM(plays) as total_plays FROM wistia_analytics.fact_engagement"
+        plays_df = query_athena(plays_query)
+        if plays_df is not None and not plays_df.empty:
+            total_plays = int(plays_df['total_plays'].values[0]) if plays_df['total_plays'].values[0] else 0
+            st.metric("Plays", f"{total_plays:,}")
+        else:
+            st.metric("Plays", "Loading...")
+    
+    with col3:
+        st.markdown("### 👥 Total Visitors")
+        visitors_query = "SELECT SUM(unique_visitors) as total_visitors FROM wistia_analytics.fact_engagement"
+        visitors_df = query_athena(visitors_query)
+        if visitors_df is not None and not visitors_df.empty:
+            total_visitors = int(visitors_df['total_visitors'].values[0]) if visitors_df['total_visitors'].values[0] else 0
+            st.metric("Visitors", f"{total_visitors:,}")
+        else:
+            st.metric("Visitors", "Loading...")
+    
+    with col4:
+        st.markdown("### 📊 Avg Engagement")
+        engagement_query = "SELECT AVG(engagement_pct) as avg_engagement FROM wistia_analytics.fact_engagement"
+        engagement_df = query_athena(engagement_query)
+        if engagement_df is not None and not engagement_df.empty:
+            avg_engagement = float(engagement_df['avg_engagement'].values[0]) if engagement_df['avg_engagement'].values[0] else 0
+            st.metric("Engagement %", f"{avg_engagement:.1f}%")
+        else:
+            st.metric("Engagement %", "Loading...")
 
 except Exception as e:
     st.error(f"❌ Error loading metrics: {str(e)}")
@@ -130,8 +148,7 @@ try:
         dm.project_name,
         fe.plays,
         fe.unique_visitors,
-        fe.engagement_pct,
-        ROUND(fe.play_rate * 100, 2) as play_rate_pct
+        ROUND(fe.engagement_pct, 2) as engagement_pct
     FROM wistia_analytics.dim_media dm
     JOIN wistia_analytics.fact_engagement fe ON dm.media_id = fe.media_id
     ORDER BY fe.plays DESC
@@ -141,22 +158,23 @@ try:
     top_videos_df = query_athena(top_videos_query)
     
     if top_videos_df is not None and not top_videos_df.empty:
-        st.dataframe(top_videos_df, use_container_width=True)
+        st.dataframe(top_videos_df, use_container_width=True, hide_index=True)
         
         # Chart: Top videos by plays
-        fig = px.bar(
-            top_videos_df.head(10),
-            x='title',
-            y='plays',
-            title='Top 10 Videos by Plays',
-            labels={'plays': 'Play Count', 'title': 'Video Title'},
-            color='engagement_pct',
-            color_continuous_scale='Viridis'
-        )
-        fig.update_layout(height=400, xaxis_tickangle=-45)
-        st.plotly_chart(fig, use_container_width=True)
+        if len(top_videos_df) > 0:
+            fig = px.bar(
+                top_videos_df.head(10),
+                x='title',
+                y='plays',
+                title='Top 10 Videos by Plays',
+                labels={'plays': 'Play Count', 'title': 'Video Title'},
+                color='engagement_pct',
+                color_continuous_scale='Viridis'
+            )
+            fig.update_layout(height=400, xaxis_tickangle=-45)
+            st.plotly_chart(fig, use_container_width=True)
     else:
-        st.info("No video data available yet.")
+        st.info("📭 No video data available yet.")
         
 except Exception as e:
     st.error(f"❌ Error loading top videos: {str(e)}")
@@ -211,7 +229,7 @@ try:
             fig2.update_layout(xaxis_tickangle=-45)
             st.plotly_chart(fig2, use_container_width=True)
     else:
-        st.info("No engagement data available yet.")
+        st.info("📭 No engagement data available yet.")
         
 except Exception as e:
     st.error(f"❌ Error loading engagement analysis: {str(e)}")
@@ -240,9 +258,9 @@ try:
     library_df = query_athena(library_query)
     
     if library_df is not None and not library_df.empty:
-        st.dataframe(library_df, use_container_width=True)
+        st.dataframe(library_df, use_container_width=True, hide_index=True)
     else:
-        st.info("No videos in library yet.")
+        st.info("📭 No videos in library yet.")
         
 except Exception as e:
     st.error(f"❌ Error loading video library: {str(e)}")
@@ -261,9 +279,9 @@ with tab1:
         dim_query = "SELECT * FROM wistia_analytics.dim_media LIMIT 100"
         dim_df = query_athena(dim_query)
         if dim_df is not None and not dim_df.empty:
-            st.dataframe(dim_df, use_container_width=True)
+            st.dataframe(dim_df, use_container_width=True, hide_index=True)
         else:
-            st.info("No data in DIM_MEDIA")
+            st.info("📭 No data in DIM_MEDIA")
     except Exception as e:
         st.error(f"Error: {str(e)}")
 
@@ -273,9 +291,9 @@ with tab2:
         fact_query = "SELECT * FROM wistia_analytics.fact_engagement LIMIT 100"
         fact_df = query_athena(fact_query)
         if fact_df is not None and not fact_df.empty:
-            st.dataframe(fact_df, use_container_width=True)
+            st.dataframe(fact_df, use_container_width=True, hide_index=True)
         else:
-            st.info("No data in FACT_ENGAGEMENT")
+            st.info("📭 No data in FACT_ENGAGEMENT")
     except Exception as e:
         st.error(f"Error: {str(e)}")
 
