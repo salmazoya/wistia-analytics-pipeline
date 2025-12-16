@@ -20,7 +20,7 @@ ssm_client = boto3.client('ssm')
 # Environment variables
 BUCKET_NAME = 'wistia-analytics'
 DYNAMODB_TABLE = 'wistia_run_status'
-SECRETS_NAME = 'wistia/api_token'  # Secrets Manager secret name
+SECRETS_NAME = 'wistia-api-token'  # Secrets Manager secret name
 
 # Logging
 logger = logging.getLogger()
