@@ -36,28 +36,6 @@ def log_info(message):
     """Log info message"""
     logger.info(f"[GLUE ETL] {message}")
 
-def read_json_from_s3(path):
-    """Read JSON files from S3"""
-    try:
-        df = spark.read.json(path)
-        count = df.count()
-        log_info(f"✅ Read {count} records from {path}")
-        return df
-    except Exception as e:
-        log_info(f"⚠️ Error reading {path}: {str(e)}")
-        return None
-
-def write_parquet_to_s3(df, path, mode='overwrite'):
-    """Write DataFrame to S3 as Parquet"""
-    try:
-        record_count = df.count()
-        df.write.mode(mode).parquet(path)
-        log_info(f"✅ Wrote {record_count} records to {path}")
-        return True
-    except Exception as e:
-        log_info(f"❌ Error writing to {path}: {str(e)}")
-        return False
-
 # ============================================================================
 # MAIN ETL PROCESS
 # ============================================================================
@@ -69,65 +47,80 @@ try:
     log_info(f"Writing to: {CURATED_PATH}")
     
     # ========================================================================
-    # READ RAW DATA
+    # READ RAW DATA - Use wildcard pattern to read all JSON files
     # ========================================================================
     
-    # Read all raw JSON files from Lambda output
-    log_info("Step 1: Reading raw Wistia data...")
-    raw_df = read_json_from_s3(f'{RAW_PATH}/**/data.json')
+    log_info("Step 1: Reading raw Wistia data from S3...")
     
-    if raw_df is None or raw_df.count() == 0:
-        log_info("❌ No raw data found!")
-        log_info(f"Expected path: {RAW_PATH}/**/data.json")
-        raise Exception("No data to process")
+    # Read all JSON files with wildcard pattern
+    # This reads from: s3://wistia-analytics/raw/wistia/execution_date=2025-12-16/media_id=*/data.json
+    raw_path_pattern = f'{RAW_PATH}/**/data.json'
     
-    log_info(f"✅ Raw data loaded: {raw_df.count()} files")
+    try:
+        raw_df = spark.read.json(raw_path_pattern)
+        raw_count = raw_df.count()
+        
+        if raw_count == 0:
+            log_info(f"❌ No data found at {raw_path_pattern}")
+            raise Exception("No data to process")
+        
+        log_info(f"✅ Raw data loaded: {raw_count} records")
+        
+    except Exception as e:
+        log_info(f"❌ Error reading from {raw_path_pattern}: {str(e)}")
+        raise
     
     # ========================================================================
-    # FLATTEN AND TRANSFORM
+    # TRANSFORM: CREATE DIMENSION TABLES
     # ========================================================================
     
     log_info("Step 2: Transforming data...")
     
-    # Extract media info and stats
+    # ---- DIM_MEDIA ----
+    log_info("Creating DIM_MEDIA...")
+    
     dim_media = raw_df.select(
-        col('media_id').alias('media_id'),
+        col('media_id').cast('long').alias('media_id'),
         col('name').alias('title'),
         col('media_info.hashed_id').alias('hashed_id'),
         col('media_info.description').alias('description'),
-        col('media_info.created_at').alias('created_at'),
-        col('media_info.duration').alias('duration_seconds'),
+        col('media_info.created').alias('created_at'),
+        col('media_info.updated').alias('updated_at'),
+        col('media_info.duration').cast('double').alias('duration_seconds'),
         col('media_info.type').alias('media_type'),
         col('media_info.status').alias('status'),
-        col('media_info.project_id').alias('project_id'),
+        col('media_info.archived').cast('boolean').alias('archived'),
+        col('media_info.project.id').cast('long').alias('project_id'),
+        col('media_info.project.name').alias('project_name'),
         current_timestamp().alias('load_timestamp'),
         lit(EXECUTION_DATE).alias('execution_date')
     ).filter(col('media_id').isNotNull()).dropDuplicates(['media_id'])
     
-    log_info(f"✅ DimMedia transformed: {dim_media.count()} records")
+    dim_media_count = dim_media.count()
+    log_info(f"✅ DIM_MEDIA: {dim_media_count} records")
     
-    # Extract stats (flatten nested structure)
-    stats_df = raw_df.select(
-        col('media_id'),
-        col('name'),
-        explode_outer(col('stats')).alias('stat') if 'stats' in raw_df.columns else col('stats')
-    )
+    # ========================================================================
+    # TRANSFORM: CREATE FACT TABLES
+    # ========================================================================
+    
+    # ---- FACT_ENGAGEMENT ----
+    log_info("Creating FACT_ENGAGEMENT...")
     
     fact_engagement = raw_df.select(
-        col('media_id'),
+        col('media_id').cast('long').alias('media_id'),
         col('name').alias('media_name'),
-        col('stats.pageLoads').alias('page_loads'),
-        col('stats.uniqueVisitors').alias('unique_visitors'),
-        col('stats.plays').alias('plays'),
-        col('stats.timePlayed').alias('time_played_seconds'),
-        col('stats.engagement').alias('engagement_pct'),
-        col('stats.cta_clicks').alias('cta_clicks'),
-        col('stats.form_submissions').alias('form_submissions'),
+        col('stats.load_count').cast('long').alias('page_loads'),
+        col('stats.play_count').cast('long').alias('plays'),
+        col('stats.play_rate').cast('double').alias('play_rate'),
+        col('stats.hours_watched').cast('double').alias('hours_watched'),
+        col('stats.engagement').cast('double').alias('engagement_pct'),
+        col('stats.visitors').cast('long').alias('unique_visitors'),
         current_timestamp().alias('load_timestamp'),
         lit(EXECUTION_DATE).alias('execution_date')
     ).filter(col('media_id').isNotNull())
     
-    log_info(f"✅ FactEngagement transformed: {fact_engagement.count()} records")
+    fact_engagement_count = fact_engagement.count()
+    log_info(f"✅ FACT_ENGAGEMENT: {fact_engagement_count} records")
     
     # ========================================================================
     # WRITE TO CURATED ZONE
@@ -135,22 +128,39 @@ try:
     
     log_info("Step 3: Writing to curated zone...")
     
-    # Write dimension table
-    write_parquet_to_s3(
-        dim_media,
-        f'{CURATED_PATH}/dim_media'
-    )
+    # Write DIM_MEDIA
+    try:
+        dim_media.write.mode('overwrite').parquet(f'{CURATED_PATH}/dim_media')
+        log_info(f"✅ Wrote DIM_MEDIA to {CURATED_PATH}/dim_media")
+    except Exception as e:
+        log_info(f"❌ Error writing DIM_MEDIA: {str(e)}")
+        raise
     
-    # Write fact table
-    write_parquet_to_s3(
-        fact_engagement,
-        f'{CURATED_PATH}/fact_engagement'
-    )
+    # Write FACT_ENGAGEMENT
+    try:
+        fact_engagement.write.mode('overwrite').parquet(f'{CURATED_PATH}/fact_engagement')
+        log_info(f"✅ Wrote FACT_ENGAGEMENT to {CURATED_PATH}/fact_engagement")
+    except Exception as e:
+        log_info(f"❌ Error writing FACT_ENGAGEMENT: {str(e)}")
+        raise
     
-    log_info("✅ ETL job completed successfully!")
+    # ========================================================================
+    # SUMMARY
+    # ========================================================================
+    
+    log_info("")
+    log_info("========================================")
+    log_info("✅ ETL JOB COMPLETED SUCCESSFULLY")
+    log_info("========================================")
+    log_info(f"DIM_MEDIA records: {dim_media_count}")
+    log_info(f"FACT_ENGAGEMENT records: {fact_engagement_count}")
+    log_info(f"Output location: {CURATED_PATH}")
+    log_info("========================================")
+    
     job.commit()
 
 except Exception as e:
+    log_info(f"")
     log_info(f"❌ ERROR in ETL job: {str(e)}")
     import traceback
     log_info(traceback.format_exc())
