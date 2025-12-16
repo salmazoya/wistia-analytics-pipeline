@@ -1,0 +1,1 @@
+{"statusCode": 500, "body": "{\"start_time\": \"2025-12-15T21:54:28.150904\", \"status\": \"FAILED\", \"media_processed\": 0, \"records_ingested\": 0, \"errors\": [\"Parameter retrieval failed for prefix: /wistia\"], \"end_time\": \"2025-12-15T21:54:28.205380\", \"duration_seconds\": 0.054491}"}
