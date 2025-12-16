@@ -1,7 +1,7 @@
 """
 Wistia Analytics Data Ingestion Lambda Function
 Fetches data from Wistia APIs and writes to S3
-Reads API token from AWS Secrets Manager (plain string format)
+Uses Bearer token authentication
 """
 
 import json
@@ -28,14 +28,11 @@ logger.setLevel(logging.INFO)
 def get_wistia_token() -> str:
     """
     Retrieve Wistia API token from AWS Secrets Manager
-    Handles plain string format
     """
     try:
         logger.info(f"Fetching Wistia API token from Secrets Manager: {SECRETS_NAME}")
         
         response = secrets_client.get_secret_value(SecretId=SECRETS_NAME)
-        
-        # Get the secret value (works for plain strings)
         token = response.get('SecretString', '')
         
         if not token:
@@ -51,15 +48,17 @@ def get_wistia_token() -> str:
 
 def get_wistia_medias(api_token: str) -> list:
     """
-    Fetch all media from Wistia account
+    Fetch all media from Wistia account using Bearer token
     """
     try:
         logger.info("Fetching media list from Wistia API...")
         
         url = "https://api.wistia.com/v1/medias.json"
-        params = {'api_password': api_token}
+        headers = {
+            "Authorization": f"Bearer {api_token}"
+        }
         
-        response = requests.get(url, params=params, timeout=30)
+        response = requests.get(url, headers=headers, timeout=30)
         response.raise_for_status()
         
         medias = response.json()
@@ -67,6 +66,12 @@ def get_wistia_medias(api_token: str) -> list:
         
         return medias
         
+    except requests.exceptions.HTTPError as e:
+        if response.status_code == 401:
+            logger.error("❌ Unauthorized: Check your API token")
+        elif response.status_code == 403:
+            logger.error("❌ Forbidden: Check your token permissions")
+        raise
     except Exception as e:
         logger.error(f"❌ Failed to fetch media: {str(e)}")
         raise
@@ -77,10 +82,12 @@ def get_media_stats(media_id: str, api_token: str) -> dict:
     Fetch engagement statistics for a specific media
     """
     try:
-        url = f"https://api.wistia.com/v1/medias/{media_id}/stats.json"
-        params = {'api_password': api_token}
+        url = f"https://api.wistia.com/v1/stats/medias/{media_id}.json"
+        headers = {
+            "Authorization": f"Bearer {api_token}"
+        }
         
-        response = requests.get(url, params=params, timeout=30)
+        response = requests.get(url, headers=headers, timeout=30)
         response.raise_for_status()
         
         return response.json()
